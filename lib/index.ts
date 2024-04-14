@@ -74,20 +74,18 @@ class KeyCDNClient {
         file.buffer = await self.stream2buffer(file.stream);
       }
 
-      // compress the image if extension match the config.tinifyInclude
-      if (
-        self.config.tinifyKey &&
-        self.config.tinifyInclude?.includes(extension)
-      ) {
-        file.buffer = await compression.compressPng(
-          self.config.tinifyKey,
-          file.buffer
-        );
-      } else if (extension === "jpg" || extension === "jpeg") {
+      // compress the image if extension match the jpg or jpeg
+      if (extension === "jpg" || extension === "jpeg") {
         // compress the image if extension is jpg or jpeg
         file.buffer = await compression.compressJpg(
           file.buffer,
           self.config.jpgQuality
+        );
+      } else if (extension === "png") {
+        // compress the image if extension is png
+        file.buffer = await compression.compressPng(
+          file.buffer,
+          self.config.pngQuality
         );
       }
 

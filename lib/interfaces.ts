@@ -28,9 +28,8 @@ interface IConfig {
   user: string;
   password: string;
   port: number;
-  tinifyKey?: string;
-  tinifyInclude?: string[];
   jpgQuality?: number;
+  pngQuality: [number, number];
   reconnectTimeout?: number;
 }
 
