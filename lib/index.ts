@@ -2,165 +2,162 @@
 
 import { ReadStream } from "fs";
 import ftp from "promise-ftp";
-import tinypngAPI from "./tinypng";
+import compression from "./image-compression";
+import { IConfig, IFile } from "./interfaces";
 
-interface IFile {
-  name: string;
-  alternativeText?: string;
-  caption?: string;
-  width?: number;
-  height?: number;
-  formats?: Record<string, unknown>;
-  hash: string;
-  ext?: string;
-  mime: string;
-  size: number;
-  sizeInBytes: number;
-  url: string;
-  previewUrl?: string;
-  path?: string;
-  provider?: string;
-  provider_metadata?: Record<string, unknown>;
-  stream?: ReadStream;
-  buffer?: Buffer;
-}
+class KeyCDNClient {
+  config: IConfig;
 
-interface IConfig {
-  uploadPath: string;
-  baseUrl: string;
-  host: string;
-  user: string;
-  password: string;
-  port: number;
-  tinifyKey?: string;
-  tinifyInclude?: string[];
-}
+  // default reconnect timeout = 2 secs
+  DEFAULT_RECONNECT_TIMEOUT: number = 2000;
 
-const getSleepTime = (sizeInBytes) => {
-  const sizeInMB: number = parseFloat((sizeInBytes / (1024 * 1024)).toFixed(2));
-  return sizeInMB > 0 ? sizeInMB * 2000 : 2000;
-};
-
-const sleep = (ms: number) => {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-};
-
-const errLog = (...args: any[]) => {
-  if (process.env.NODE_ENV !== "production") {
-    console.debug(">>>>>>> upload keycdn <<<<<<<");
-    console.debug(...args);
+  constructor(config: IConfig) {
+    this.config = config;
   }
-};
 
-const stream2buffer = async (stream: ReadStream): Promise<Buffer> => {
-  return new Promise((resolve, reject) => {
-    const _buf: any[] = [];
-    stream.on("data", (chunk: any) => _buf.push(chunk));
-    stream.on("end", () => resolve(Buffer.concat(_buf)));
-    stream.on("error", (err: any) => reject(err));
-  });
-};
-
-const getConnection = async (config: IConfig, sleepTime: number) => {
-  let client = new ftp();
-  try {
-    await client.connect({
-      host: config.host,
-      user: config.user,
-      password: config.password,
-      port: config.port,
+  sleep = (ms: number) => {
+    return new Promise((resolve) => {
+      setTimeout(resolve, ms);
     });
-    return client;
-  } catch (err) {
-    errLog(err);
+  };
 
-    // when more than 3 connections as the same user error occur, wait and reconnect to the KeyCDN
-    client.destroy();
-    await sleep(sleepTime);
-    console.log("reconnect to keycdn");
-    return getConnection(config, sleepTime);
-  }
-};
-
-const ftpUpload = (config: IConfig, file: IFile) =>
-  new Promise(async (resolve, reject) => {
-    // prepare the file content
-    if (file.stream) {
-      file.buffer = await stream2buffer(file.stream);
+  errLog = (...args: any[]) => {
+    if (process.env.NODE_ENV !== "production") {
+      console.debug(">>>>>>> upload keycdn <<<<<<<");
+      console.debug(...args);
     }
+  };
 
-    const sizeInBytes: number = Buffer.byteLength(file.buffer);
+  stream2buffer = async (stream: ReadStream): Promise<Buffer> => {
+    return new Promise((resolve, reject) => {
+      const _buf: any[] = [];
+      stream.on("data", (chunk: any) => _buf.push(chunk));
+      stream.on("end", () => resolve(Buffer.concat(_buf)));
+      stream.on("error", (err: any) => reject(err));
+    });
+  };
 
-    // compass the target image
-    if (
-      config.tinifyKey &&
-      config.tinifyInclude?.includes(file.ext.replace(".", ""))
-    ) {
-      file.buffer = await tinypngAPI.compassImage(
-        config.tinifyKey,
-        file.buffer
-      );
+  getConnection = async () => {
+    // get the sleep time for reconnect
+    const sleepTime: number =
+      this.config.reconnectTimeout ?? this.DEFAULT_RECONNECT_TIMEOUT;
+
+    let client = new ftp();
+    try {
+      await client.connect({
+        host: this.config.host,
+        user: this.config.user,
+        password: this.config.password,
+        port: this.config.port,
+      });
+      return client;
+    } catch (err) {
+      // when more than 3 connections as the same user error occur, wait and reconnect to the KeyCDN
+      if (err.code === 421) {
+        client.destroy();
+        await this.sleep(sleepTime);
+        console.log("reconnect to keycdn");
+        return this.getConnection();
+      } else {
+        this.errLog(err);
+      }
     }
+  };
 
-    const sleepTime: number = getSleepTime(sizeInBytes);
-    const client = await getConnection(config, sleepTime);
+  ftpUpload = (file: IFile) =>
+    new Promise(async (resolve, reject) => {
+      const self: KeyCDNClient = this;
+      const extension: string = file.ext.replace(".", "");
 
-    // prepare the file path
-    const path: string = config?.uploadPath ? `${config.uploadPath}/` : "";
-    const fileName: string = `${file.hash}${file.ext}`;
-    const fullPath: string = `${path}${fileName}`;
+      // prepare the file content
+      if (file.stream) {
+        file.buffer = await self.stream2buffer(file.stream);
+      }
 
-    // start to upload file
-    client
-      .put(file.buffer, fullPath)
-      .then(function () {
-        file.url = `${config.baseUrl}/${fileName}`;
-        delete file.buffer;
-        client.destroy();
+      // compress the image if extension match the jpg or jpeg
+      if (extension === "jpg" || extension === "jpeg") {
+        // compress the image if extension is jpg or jpeg
+        file.buffer = await compression.compressJpg(
+          file.buffer,
+          self.config.jpgQuality
+        );
+      } else if (extension === "png") {
+        // compress the image if extension is png
+        file.buffer = await compression.compressPng(
+          file.buffer,
+          self.config.pngQuality
+        );
+      }
 
-        resolve(file);
-      })
-      .catch(function (err: any) {
-        client.end();
-        errLog(err);
-        reject(err);
-      });
-  });
+      // calculate the size in kb
+      const fileSizeInKb: number = Buffer.byteLength(file.buffer) / 1024;
+      file.size = fileSizeInKb;
 
-const ftpDelete = (config: IConfig, file: IFile) =>
-  new Promise(async (resolve, reject) => {
-    const sleepTime: number = getSleepTime(file.size);
-    const client = await getConnection(config, sleepTime);
+      // connect to ftp server
+      const client = await self.getConnection();
 
-    // prepare the file path
-    const path: string = config?.uploadPath ? `${config.uploadPath}/` : "";
-    const fileName: string = `${file.hash}${file.ext}`;
-    const fullPath: string = `${path}${fileName}`;
+      // prepare the file path
+      const path: string = self.config?.uploadPath
+        ? `${self.config.uploadPath}/`
+        : "";
+      const fileName: string = `${file.hash}${file.ext}`;
+      const fullPath: string = `${path}${fileName}`;
 
-    // start to delete file
-    client
-      .delete(fullPath)
-      .then(function () {
-        client.destroy();
-        resolve("");
-      })
-      .catch(function (err: any) {
-        client.end();
-        errLog(err);
-        reject(err);
-      });
-  });
+      // start to upload file
+      client
+        .put(file.buffer, fullPath)
+        .then(function () {
+          file.url = `${self.config.baseUrl}/${fileName}`;
+          delete file.buffer;
+          client.destroy();
+
+          resolve(file);
+        })
+        .catch(function (err: any) {
+          client.end();
+          self.errLog(err);
+          reject(err);
+        });
+    });
+
+  ftpDelete = (file: IFile) =>
+    new Promise(async (resolve, reject) => {
+      const self: KeyCDNClient = this;
+
+      // connect to ftp server
+      const client = await self.getConnection();
+
+      // prepare the file path
+      const path: string = self.config?.uploadPath
+        ? `${self.config.uploadPath}/`
+        : "";
+      const fileName: string = `${file.hash}${file.ext}`;
+      const fullPath: string = `${path}${fileName}`;
+
+      // start to delete file
+      client
+        .delete(fullPath)
+        .then(function () {
+          client.destroy();
+          resolve("");
+        })
+        .catch(function (err: any) {
+          client.end();
+          self.errLog(err);
+          reject(err);
+        });
+    });
+}
 
 module.exports = {
   provider: "keycdn",
   name: "KeyCDN",
   init: (config: IConfig) => {
+    const keyCDNClient: KeyCDNClient = new KeyCDNClient(config);
     return {
-      uploadStream: (file: IFile) => ftpUpload(config, file),
-      upload: (file: IFile) => ftpUpload(config, file),
-      delete: (file: IFile) => ftpDelete(config, file),
+      uploadStream: (file: IFile) => keyCDNClient.ftpUpload(file),
+      upload: (file: IFile) => keyCDNClient.ftpUpload(file),
+      delete: (file: IFile) => keyCDNClient.ftpDelete(file),
     };
   },
 };
